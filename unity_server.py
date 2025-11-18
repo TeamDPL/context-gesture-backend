@@ -8,10 +8,13 @@ import datetime
 
 app = FastAPI()
 
-SAVE_DIRECTORY = Path("unity_context_images")
-SAVE_DIRECTORY.mkdir(parents=True, exist_ok=True)
+SCREEN_SAVE_DIRECTORY = Path("screen_images")
+SCREEN_SAVE_DIRECTORY.mkdir(parents=True, exist_ok=True)
 
-@app.websocket("/ws/process-gesture-stream")
+OBJ_SAVE_DIRECTORY = Path("obj_images")
+OBJ_SAVE_DIRECTORY.mkdir(parents=True, exist_ok=True)
+
+@app.websocket("/ws/process-gesture-context-stream")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     print("Unity client connected.")
@@ -32,11 +35,12 @@ async def websocket_endpoint(websocket: WebSocket):
                 print("R Hand World X:", right_hand_data)
 
             # screen data
-            screen_capture_b64 = data.get("screen_capture")
-            
-            if screen_capture_b64:
+            screen_capture = data.get("screen_capture")
+            object_captures = data.get("object_captures")
+
+            if screen_capture:
                 try:
-                    img_bytes = base64.b64decode(screen_capture_b64)
+                    img_bytes = base64.b64decode(screen_capture)
                     nparr = np.frombuffer(img_bytes, np.uint8)
                     img_cv = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
@@ -44,13 +48,10 @@ async def websocket_endpoint(websocket: WebSocket):
                         print(f"Successfully decoded image, shape: {img_cv.shape}")
 
                         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-                        filename = f"capture_{timestamp}.jpg"
+                        filename = f"screen_{timestamp}.jpg"
                         
-                        # 2. Create the full file path
-                        file_path = SAVE_DIRECTORY / filename
+                        file_path = SCREEN_SAVE_DIRECTORY / filename
 
-                        # 3. Save the image to disk
-                        #    cv2.imwrite() takes the (string) path and the image object
                         cv2.imwrite(str(file_path), img_cv)
                         
                         print(f"Successfully saved image to {file_path}")
@@ -59,6 +60,39 @@ async def websocket_endpoint(websocket: WebSocket):
                     
                 except Exception as e:
                     print(f"Error decoding image: {e}")
+            
+            if object_captures:
+                print(f"--- Processing frame with {len(object_captures)} captured objects ---")
+                
+                for capture in object_captures:
+                    label = capture.get("label", "unknown_object")
+                    img_b64 = capture.get("image_base64")
+                    
+                    if not img_b64:
+                        continue
+                        
+                    try:
+                        # Decode each image
+                        img_bytes = base64.b64decode(img_b64)
+                        nparr = np.frombuffer(img_bytes, np.uint8)
+                        img_cv = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
+                        if img_cv is not None:
+                            print(f"  > Decoded image for object: '{label}', shape: {img_cv.shape}")
+                            
+                            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+                            filename = f"{label}_{datetime.datetime.now().strftime('%f')}.jpg"
+                            
+                            # 2. Create the full file path
+                            file_path = OBJ_SAVE_DIRECTORY / filename
+
+                            # 3. Save the image to disk
+                            cv2.imwrite(str(file_path), img_cv)
+                            
+                            print(f"Successfully saved image to {file_path}")
+
+                    except Exception as e:
+                        print(f"Error decoding image for '{label}': {e}")
             
             result = {"action": "Equip", "tool": "Axe_From_WS"}
             
