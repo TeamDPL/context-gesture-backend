@@ -9,6 +9,7 @@ from collections import deque
 from PIL import Image
 import torch
 from owl_sgvit_gru import OWLSGVitConfig, OWLSGVitGRU
+from gesture_encoder import GestureStreamProcessor
 
 # ==== Context encoder hyperparams ====
 TEXT_QUERIES     = ["object"]  
@@ -37,6 +38,9 @@ context_model = OWLSGVitGRU(cfg, device=device)
 # the number of frame: 10
 frame_buffer = deque(maxlen=FRAME_BUFFER_LEN)
 
+# Gesture Encoder Initialization
+gesture_processor = GestureStreamProcessor(device=device)
+
 app = FastAPI()
 
 SCREEN_SAVE_DIRECTORY = Path("screen_images")
@@ -59,8 +63,12 @@ async def websocket_endpoint(websocket: WebSocket):
             left_hand_data = data.get("left_hand")
             right_hand_data = data.get("right_hand")
 
-            # GESTURE-ENCODER RECALL BELOW
+            # Process Hand Data
+            gesture_feature = gesture_processor.process(left_hand_data, right_hand_data)
             
+            if gesture_feature is not None:
+                print("Gesture Feature shape:", gesture_feature.shape)
+                print("Gesture Feature (first 5 rows):", gesture_feature.head(5))
 
             if left_hand_data:
                 print("L Hand World X:", left_hand_data)
