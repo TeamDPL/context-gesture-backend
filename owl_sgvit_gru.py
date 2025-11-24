@@ -171,6 +171,19 @@ class OWLSGVitGRU(nn.Module):
         self.temporal = GRUAggregator(config.frame_dim).to(device)
 
     @torch.no_grad()
+    def _extract_vision_tokens(self, outputs) -> torch.Tensor:
+        """
+        Grab the last hidden states from the vision tower across HF versions.
+        """
+        if getattr(outputs, "vision_model_output", None) is not None:
+            return outputs.vision_model_output.last_hidden_state[0]
+        if getattr(outputs, "vision_hidden_states", None):
+            return outputs.vision_hidden_states[-1][0]
+        if getattr(outputs, "vision_outputs", None) is not None:
+            return outputs.vision_outputs.last_hidden_state[0]
+        raise AttributeError("OWL-ViT output is missing vision hidden states")
+
+    @torch.no_grad()
     def forward_frames(self, frames: List[Image.Image]) -> torch.Tensor:
         """
         frames: list of PIL Images length T
@@ -204,7 +217,8 @@ class OWLSGVitGRU(nn.Module):
             return_tensors="pt"
         ).to(self.device)
 
-        outputs = self.owl(**inputs)
+        outputs = self.owl(**inputs, output_hidden_states=True)
+        vision_tokens = self._extract_vision_tokens(outputs)
 
         # -------------------------
         # 1) Boxes from OWL-ViT
@@ -221,7 +235,6 @@ class OWLSGVitGRU(nn.Module):
 
         if boxes.numel() == 0:
             # fallback: no detections -> use CLS-like global token pool
-            vision_tokens = outputs.vision_outputs.last_hidden_state[0]  # [N,D]
             return vision_tokens.mean(dim=0)
 
         # keep top max_objects by score
@@ -232,7 +245,6 @@ class OWLSGVitGRU(nn.Module):
         # -------------------------
         # 2) Patch tokens
         # -------------------------
-        vision_tokens = outputs.vision_outputs.last_hidden_state[0]  # [N, D]
         img_w, img_h = image.size
         patch_size = self.processor.image_processor.patch_size  # usually 16
 
