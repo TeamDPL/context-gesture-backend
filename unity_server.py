@@ -5,6 +5,37 @@ import numpy as np  # image array
 import cv2 # image processing
 from pathlib import Path
 import datetime
+from collections import deque
+from PIL import Image
+import torch
+from owl_sgvit_gru import OWLSGVitConfig, OWLSGVitGRU
+
+# ==== Context encoder hyperparams ====
+TEXT_QUERIES     = ["object"]  
+DET_THRESHOLD    = 0.2
+MAX_OBJECTS      = 64
+TOPK_RELATIONS   = 32
+FRAME_DIM        = 768
+USE_ATTN_POOL    = True
+FRAME_BUFFER_LEN = 10 
+# =====================================
+
+# model config
+cfg = OWLSGVitConfig(
+    text_queries=TEXT_QUERIES,
+    det_threshold=DET_THRESHOLD,
+    max_objects=MAX_OBJECTS,
+    topk_relations=TOPK_RELATIONS,
+    frame_dim=FRAME_DIM,
+    use_attn_pool=USE_ATTN_POOL,
+)
+
+# Load model
+device = "cuda" if torch.cuda.is_available() else "cpu"
+context_model = OWLSGVitGRU(cfg, device=device)
+
+# the number of frame: 10
+frame_buffer = deque(maxlen=FRAME_BUFFER_LEN)
 
 app = FastAPI()
 
@@ -27,7 +58,10 @@ async def websocket_endpoint(websocket: WebSocket):
             # gesture data
             left_hand_data = data.get("left_hand")
             right_hand_data = data.get("right_hand")
+
+            # GESTURE-ENCODER RECALL BELOW
             
+
             if left_hand_data:
                 print("L Hand World X:", left_hand_data)
 
@@ -56,8 +90,15 @@ async def websocket_endpoint(websocket: WebSocket):
                         
                         print(f"Successfully saved image to {file_path}")
                         
-                    # SLAM / CV PROCESSING BELOW
-                    
+                        # CONTEXT-ENCODER RECALL BELOW
+                        pil_img = Image.fromarray(cv2.cvtColor(img_cv, cv2.COLOR_BGR2RGB))
+                        frame_buffer.append(pil_img)
+
+                        if len(frame_buffer) == frame_buffer.maxlen:
+                            with torch.no_grad():
+                                c = context_model.forward_frames(list(frame_buffer))
+                            print("context embedding from last 10 frames:", c.shape)    # Print only yet
+
                 except Exception as e:
                     print(f"Error decoding image: {e}")
             
