@@ -1,4 +1,5 @@
 import math
+import os
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
@@ -130,6 +131,9 @@ class OWLSGVitConfig:
     topk_relations: int = 32   # K
     frame_dim: int = 768       # OWL-ViT base hidden dim
     use_attn_pool: bool = True
+    owl_pretrained_path: Optional[str] = None         # set to local dir to avoid downloads
+    processor_pretrained_path: Optional[str] = None   # set to local dir to avoid downloads
+    local_files_only: bool = False                    # True for strict offline
 
 
 class OWLSGVitGRU(nn.Module):
@@ -138,10 +142,26 @@ class OWLSGVitGRU(nn.Module):
         self.cfg = config
         self.device = device
 
+        # Resolve paths for offline/local checkpoints
+        processor_path = (
+            config.processor_pretrained_path
+            or os.getenv("OWL_VIT_PROCESSOR_PATH")
+            or "google/owlvit-base-patch16"
+        )
+        model_path = (
+            config.owl_pretrained_path
+            or os.getenv("OWL_VIT_MODEL_PATH")
+            or "google/owlvit-base-patch16"
+        )
+
         # HF OWL-ViT
-        self.processor = OwlViTProcessor.from_pretrained("google/owlvit-base-patch16")
+        self.processor = OwlViTProcessor.from_pretrained(
+            processor_path,
+            local_files_only=config.local_files_only,
+        )
         self.owl = OwlViTForObjectDetection.from_pretrained(
-            "google/owlvit-base-patch16"
+            model_path,
+            local_files_only=config.local_files_only,
         ).to(device)
         self.owl.eval()  # we start inference mode
 
@@ -268,7 +288,10 @@ if __name__ == "__main__":
         max_objects=64,
         topk_relations=32,
         frame_dim=768,      # owlvit-base hidden dim
-        use_attn_pool=True
+        use_attn_pool=True,
+        owl_pretrained_path="./hf_models/owlvit-base-patch16",         
+        processor_pretrained_path="./hf_models/owlvit-base-patch16",   
+        local_files_only=True,     
     )
 
     model = OWLSGVitGRU(cfg, device="cuda" if torch.cuda.is_available() else "cpu")
