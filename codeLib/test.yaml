@@ -1,3 +1,0 @@
-BASIC:
-  BASE_PATH: ./media/
-  PATH: ${BASE_PATH}HELLO
