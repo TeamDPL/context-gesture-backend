@@ -18,9 +18,9 @@ import cv2, torch
 import torch.nn as nn
 
 # ========= 사용자 기본 설정 (필요시 인자 override) =========
-#TDGCN_REPO = "TDGCN" # TODO: Update this path to the actual TDGCN repository location
-CONFIG_YAML  = "tdgcn_checkpoint/DHG14-28.yaml"
-WEIGHTS_PATH = "tdgcn_checkpoint/Sub3_j.pt"
+TDGCN_REPO   = os.path.expanduser("./TD-GCN-Gesture")
+CONFIG_YAML  = os.path.join(TDGCN_REPO, "config", "dhg14-28", "DHG14-28.yaml")
+WEIGHTS_PATH = os.path.join(TDGCN_REPO, "checkpoints", "DHG", "DHG14label", "Sub3_j.pt")
 SEQ_LEN = 64
 PRINT_INTERVAL = 1.0
 
@@ -91,8 +91,8 @@ def wrist_world_norm(wrist_world_xyz, w, h):
 # ========= TD-GCN 로더 (안전 로더 + hook) =========
 
 def build_tdgcn_and_load(weights_path, config_yaml, device):
-    #sys.path.append(TDGCN_REPO)
-    with open(config_yaml, "r") as f:
+    sys.path.append(TDGCN_REPO)
+    with open(config_yaml, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
 
     model, last_err = None, None

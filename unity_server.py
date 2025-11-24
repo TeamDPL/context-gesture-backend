@@ -108,12 +108,13 @@ async def websocket_endpoint(websocket: WebSocket):
             if gesture_embedding is not None:
                 latest_gesture_embed = gesture_embedding.detach()
                 print("Gesture embedding shape:", gesture_embedding.shape)
+                print("Gesture embedding head:", gesture_embedding[0, :5])
 
-            if left_hand_data:
-                print("L Hand World X:", left_hand_data)
+            #if left_hand_data:
+            #    print("L Hand World X:", left_hand_data)
 
-            if right_hand_data:
-                print("R Hand World X:", right_hand_data)
+            #if right_hand_data:
+            #    print("R Hand World X:", right_hand_data)
 
             # screen data
             screen_capture = data.get("screen_capture")
