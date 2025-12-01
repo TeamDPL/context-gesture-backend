@@ -170,7 +170,7 @@ class OWLSGVitGRU(nn.Module):
         self.pool = AttnPool(config.frame_dim).to(device) if config.use_attn_pool else None
         self.temporal = GRUAggregator(config.frame_dim).to(device)
 
-    @torch.no_grad()
+    ()
     def _extract_vision_tokens(self, outputs) -> torch.Tensor:
         """
         Grab the last hidden states from the vision tower across HF versions.
@@ -183,7 +183,7 @@ class OWLSGVitGRU(nn.Module):
             return outputs.vision_outputs.last_hidden_state[0]
         raise AttributeError("OWL-ViT output is missing vision hidden states")
 
-    @torch.no_grad()
+    ()
     def forward_frames(self, frames: List[Image.Image]) -> torch.Tensor:
         """
         frames: list of PIL Images length T
@@ -198,7 +198,7 @@ class OWLSGVitGRU(nn.Module):
         c = self.temporal(Z)                         # [1, D]
         return c
 
-    @torch.no_grad()
+    ()
     def encode_one_frame(self, image: Image.Image) -> torch.Tensor:
         """
         Per-frame pipeline:

@@ -375,8 +375,8 @@ class TDGCN_Wrist_Encoder(nn.Module):
         x_flat = x.view(B * Two, C, T, V, M)
         
         logits = self.model(x_flat)
-        if self.feature_blob["feat"] is not None:
-            enc = self.feature_blob["feat"] # (B*2, 256)
+        if self.feature_blob["feat"] is not None and not self.training:
+            enc = self.feature_blob["feat"]  # (B*2, 256) detached for inference
         else:
             enc = logits
             
