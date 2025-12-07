@@ -422,6 +422,9 @@ class GestureStreamProcessor:
         if r_xyz is not None:
             current_hands["Right"] = r_xyz
 
+        # Track which hand's wrist is being used as reference
+        is_left_hand_wrist_based = False
+
         # If we have any hand data, process it
         if current_hands:
             # Convert to 22 joints first
@@ -429,21 +432,24 @@ class GestureStreamProcessor:
             for side, xyz21 in current_hands.items():
                 xyz22_dict[side] = mediapipe21_to_dhg22(xyz21)
 
-            # Update Left Wrist Reference if Left hand is visible
+            # Determine which hand's wrist to use as reference
+            # Priority: Left hand if visible, otherwise Right hand
+            origin = None
             if "Left" in xyz22_dict:
-                self.left_wrist_world_ref = xyz22_dict["Left"][0].copy()
+                origin = xyz22_dict["Left"][0].copy()
+                self.left_wrist_world_ref = origin
+                is_left_hand_wrist_based = True
+            elif "Right" in xyz22_dict:
+                # Use right hand wrist if left is not visible
+                origin = xyz22_dict["Right"][0].copy()
+                self.left_wrist_world_ref = origin  # Update reference to right wrist
+                is_left_hand_wrist_based = False
             
-            # Determine Origin & Normalize
+            # Normalize both hands using the determined origin
             for side in ["Left", "Right"]:
                 if side in xyz22_dict:
                     xyz22 = xyz22_dict[side]
-                    
-                    if self.left_wrist_world_ref is not None:
-                        origin = self.left_wrist_world_ref
-                    else:
-                        origin = xyz22[0] # Use own wrist if no reference
-                        
-                    # Normalize
+                    # Normalize using the determined origin
                     xyz22_norm = normalize_xyz(xyz22, origin=origin)
                     self.seq_buf[side].append(xyz22_norm)
                 else:
@@ -464,9 +470,9 @@ class GestureStreamProcessor:
                 
                 with torch.no_grad():
                     gesture_feature = self.encoder(x)
-                    return gesture_feature
+                    return gesture_feature, is_left_hand_wrist_based
         
-        return None
+        return None, is_left_hand_wrist_based
 
 def get_encoder(device):
     return TDGCN_Wrist_Encoder(device)

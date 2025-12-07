@@ -104,11 +104,16 @@ async def websocket_endpoint(websocket: WebSocket):
             right_hand_data = data.get("right_hand")
 
             # Process Hand Data
-            gesture_embedding = gesture_processor.process(left_hand_data, right_hand_data)
-            if gesture_embedding is not None:
-                latest_gesture_embed = gesture_embedding.detach()
-                print("Gesture embedding shape:", gesture_embedding.shape)
-                print("Gesture embedding head:", gesture_embedding[0, :5])
+            gesture_result = gesture_processor.process(left_hand_data, right_hand_data)
+            is_left_hand_wrist_based = False  # Default value
+            
+            if gesture_result is not None:
+                gesture_embedding, is_left_hand_wrist_based = gesture_result
+                if gesture_embedding is not None:
+                    latest_gesture_embed = gesture_embedding.detach()
+                    print("Gesture embedding shape:", gesture_embedding.shape)
+                    print("Gesture embedding head:", gesture_embedding[0, :5])
+                    print(f"Reference wrist: {'Left' if is_left_hand_wrist_based else 'Right'}")
 
             #if left_hand_data:
             #    print("L Hand World X:", left_hand_data)
@@ -215,9 +220,12 @@ async def websocket_endpoint(websocket: WebSocket):
                     scores = item_logits[0, : len(inventory_labels)].detach().cpu().tolist()
                     print(f"[Classifier] predicted tool: {predicted_tool} (idx={idx}) scores={scores}")
 
-            # Unity expects the predicted tool id/name as a raw string (empty if none)
-            result = predicted_tool if predicted_tool is not None else ""
-            await websocket.send_json(result)
+            # Build response with predicted tool and reference wrist info
+            response = {
+                "predicted_tool": predicted_tool if predicted_tool is not None else "",
+                "is_left_hand_wrist_based": is_left_hand_wrist_based
+            }
+            await websocket.send_json(response)
             
     except WebSocketDisconnect:
         print("Unity client disconnected.")
