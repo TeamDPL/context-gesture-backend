@@ -5,6 +5,7 @@ import numpy as np  # image array
 import cv2 # image processing
 from pathlib import Path
 import datetime
+import asyncio
 
 app = FastAPI()
 
@@ -56,6 +57,9 @@ async def websocket_endpoint(websocket: WebSocket):
                         # print(f"Successfully saved image to {file_path}")
                         
                     # SLAM / CV PROCESSING BELOW
+                    await asyncio.sleep(2)
+                    result = {"ID": "Knife"}
+                    await websocket.send_json(result)
                     
                 except Exception as e:
                     print(f"Error decoding image: {e}")
@@ -91,9 +95,6 @@ async def websocket_endpoint(websocket: WebSocket):
 
                     except Exception as e:
                         print(f"Error decoding image for '{label}': {e}")
-            
-            result = {"ID": "CuttingBoard"}
-            await websocket.send_json(result)
             
     except WebSocketDisconnect:
         print("Unity client disconnected.")
