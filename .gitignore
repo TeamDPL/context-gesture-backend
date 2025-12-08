@@ -219,6 +219,8 @@ __marimo__/
 unity_context_images/
 screen_images/
 obj_images/
+obj_images_end2end/
+screen_images_end2end/
 
 # TD-GCN-Gesture
 TD-GCN-Gesture/

@@ -20,7 +20,7 @@ from owl_sgvit_gru import OWLSGVitConfig, OWLSGVitGRU
 REPO_DIR = Path(__file__).resolve().parent
 DEFAULT_CKPT = REPO_DIR / "checkpoints_end2end" / "epoch_6.pt"
 CKPT_PATH = Path(os.getenv("E2E_CKPT_PATH", str(DEFAULT_CKPT)))
-DEFAULT_INVENTORY_TEXTS = REPO_DIR.parent / "dataset" / "F-PHAB" / "fphab_inventory_texts.json"
+DEFAULT_INVENTORY_TEXTS = REPO_DIR.parent / "context-gesture-backend" / "json" / "fphab_inventory_texts.json"
 INVENTORY_TEXTS_PATH = Path(os.getenv("INVENTORY_TEXTS_PATH", str(DEFAULT_INVENTORY_TEXTS)))
 
 # ==== Globals ====
@@ -98,7 +98,7 @@ def _load_models():
         use_clip_inventory=True,
         clip_local_path=clip_path,
         clip_local_files_only=clip_local_only,
-        use_leaf_queries=True,
+        use_leaf_queries=False,
         leaf_text_prompts=ck_cfg.get("leaf_text_prompts"),
     )
 
