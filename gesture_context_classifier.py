@@ -279,6 +279,29 @@ class GestureContextTreeClassifier(nn.Module):
 
         self.to(self.device_name)
 
+    def _compute_query_and_leaf_probs(
+        self,
+        gesture_embed: torch.Tensor,
+        context_embed: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        gesture_embed = gesture_embed.to(self.device_name)
+        context_embed = context_embed.to(self.device_name)
+
+        fused = self.fusion(gesture_embed, context_embed)
+        leaf_probs = self.tree(fused)
+
+        if self.clip_scorer is None:
+            raise RuntimeError("use_clip_inventory=False is not supported in paper-aligned runtime. Enable CLIP.")
+
+        fused_q = F.normalize(self.query_proj(fused), dim=-1)
+        if self.cfg.use_leaf_queries:
+            leaf_q = F.normalize(self.leaf_queries, dim=-1)
+            q = leaf_probs @ leaf_q
+            q = F.normalize(q, dim=-1)
+        else:
+            q = fused_q
+        return q, leaf_probs
+
     def forward(
         self,
         gesture_embed: torch.Tensor,
@@ -291,31 +314,11 @@ class GestureContextTreeClassifier(nn.Module):
           leaf_probs:  [B, L]
           inv_mask:    [B, I_max]
         """
-        gesture_embed = gesture_embed.to(self.device_name)
-        context_embed = context_embed.to(self.device_name)
-
-        fused = self.fusion(gesture_embed, context_embed)  # [B, fusion_dim]
-        leaf_probs = self.tree(fused)                      # [B, L]
-
-        if self.clip_scorer is None:
-            raise RuntimeError("use_clip_inventory=False is not supported in paper-aligned runtime. Enable CLIP.")
-
+        q, leaf_probs = self._compute_query_and_leaf_probs(gesture_embed, context_embed)
         if inventory_texts is None:
             raise RuntimeError("inventory_texts required for CLIP inventory scoring.")
 
         inv_embeds, inv_mask = self.clip_scorer.batch_encode_inventory(inventory_texts)  # [B,I,D], [B,I]
-
-        # Make query in CLIP space
-        fused_q = F.normalize(self.query_proj(fused), dim=-1)  # [B, D]
-
-        if self.cfg.use_leaf_queries:
-            # leaf mixing to produce final query
-            leaf_q = F.normalize(self.leaf_queries, dim=-1)    # [L, D]
-            q = leaf_probs @ leaf_q                            # [B, D]
-            q = F.normalize(q, dim=-1)
-        else:
-            # simple fused query
-            q = fused_q
 
         # Similarity to inventory items
         # item_logits[b,i] = (q_b · inv_embeds_bi) / sim_temperature
@@ -356,6 +359,34 @@ class GestureContextTreeClassifier(nn.Module):
             "path_entropy": float(entropy_penalty.item()),
         }
 
+    def forward_with_embeddings(
+        self,
+        gesture_embed: torch.Tensor,
+        context_embed: torch.Tensor,
+        inventory_embeddings: torch.Tensor,
+        inventory_mask: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        inventory_embeddings: [B, I, D] tensor of normalized CLIP embeddings.
+        inventory_mask: optional [B, I] bool tensor indicating valid slots.
+        """
+        if inventory_embeddings.dim() != 3:
+            raise ValueError("inventory_embeddings must be [B, I, D].")
+
+        q, leaf_probs = self._compute_query_and_leaf_probs(gesture_embed, context_embed)
+        inv = inventory_embeddings.to(self.device_name)
+        inv = F.normalize(inv, dim=-1)
+
+        if inventory_mask is None:
+            inventory_mask = torch.ones(inv.shape[:2], dtype=torch.bool, device=inv.device)
+        else:
+            inventory_mask = inventory_mask.to(inv.device)
+
+        item_logits = torch.einsum("bd,bid->bi", q, inv)
+        item_logits = item_logits / max(self.cfg.sim_temperature, 1e-6)
+        item_logits = item_logits.masked_fill(~inventory_mask, float("-inf"))
+        return item_logits, leaf_probs, inventory_mask
+
     @torch.no_grad()
     def predict(
         self,
@@ -372,6 +403,23 @@ class GestureContextTreeClassifier(nn.Module):
             gesture_embed,
             context_embed,
             inventory_texts=inventory_texts,
+        )
+        pred_idx = torch.argmax(item_logits, dim=-1)
+        return pred_idx, item_logits
+
+    @torch.no_grad()
+    def predict_from_embeddings(
+        self,
+        gesture_embed: torch.Tensor,
+        context_embed: torch.Tensor,
+        inventory_embeddings: torch.Tensor,
+        inventory_mask: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        item_logits, _, _ = self.forward_with_embeddings(
+            gesture_embed,
+            context_embed,
+            inventory_embeddings=inventory_embeddings,
+            inventory_mask=inventory_mask,
         )
         pred_idx = torch.argmax(item_logits, dim=-1)
         return pred_idx, item_logits

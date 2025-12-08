@@ -20,6 +20,8 @@ from owl_sgvit_gru import OWLSGVitConfig, OWLSGVitGRU
 REPO_DIR = Path(__file__).resolve().parent
 DEFAULT_CKPT = REPO_DIR / "checkpoints_end2end" / "epoch_6.pt"
 CKPT_PATH = Path(os.getenv("E2E_CKPT_PATH", str(DEFAULT_CKPT)))
+DEFAULT_INVENTORY_TEXTS = REPO_DIR.parent / "dataset" / "F-PHAB" / "fphab_inventory_texts.json"
+INVENTORY_TEXTS_PATH = Path(os.getenv("INVENTORY_TEXTS_PATH", str(DEFAULT_INVENTORY_TEXTS)))
 
 # ==== Globals ====
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -29,6 +31,7 @@ app = FastAPI()
 latest_gesture_embed = None  # torch.Tensor [1, G]
 latest_context_embed = None  # torch.Tensor [1, C]
 is_left_hand_wrist_based = False
+inventory_embedding_bank = {}
 
 
 def _resolve_path(from_cfg, env_var, default_subdir):
@@ -139,6 +142,47 @@ def _load_models():
 
 gesture_processor, context_model, classifier, frame_buffer, ck_cfg = _load_models()
 
+
+def _normalize_label(name: str) -> str:
+    return name.strip().lower().replace(" ", "_").replace("-", "_")
+
+
+def _load_inventory_embeddings(path: Path):
+    if not path.exists():
+        print(f"[inventory] Embedding file not found at {path}; falling back to text encoding.")
+        return {}
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as exc:
+        print(f"[inventory] Failed to load embeddings from {path}: {exc}")
+        return {}
+
+    bank = {}
+    for entry in data:
+        name = entry.get("object_name")
+        if not name:
+            continue
+        emb = entry.get("inventory_embedding") or entry.get("fused_embedding")
+        if emb is None:
+            continue
+        tensor = torch.tensor(emb, dtype=torch.float32)
+        norm = torch.norm(tensor)
+        if norm.item() > 0:
+            tensor = tensor / norm
+        bank[_normalize_label(name)] = tensor
+
+    print(f"[inventory] Loaded {len(bank)} inventory embeddings from {path}.")
+    return bank
+
+
+inventory_embedding_bank = _load_inventory_embeddings(INVENTORY_TEXTS_PATH)
+if not inventory_embedding_bank:
+    raise RuntimeError(
+        f"No inventory embeddings loaded from {INVENTORY_TEXTS_PATH}. "
+        "Generate the file via generate_inventory_texts.py or set INVENTORY_TEXTS_PATH."
+    )
+
 # Optional save directories (disabled by default)
 SCREEN_SAVE_DIRECTORY = REPO_DIR / "screen_images_end2end"
 OBJ_SAVE_DIRECTORY = REPO_DIR / "obj_images_end2end"
@@ -234,24 +278,37 @@ async def websocket_endpoint(websocket: WebSocket):
 
             # ---- Prediction ----
             predicted_tool = ""
+            scores = None
             if latest_gesture_embed is not None and latest_context_embed is not None and inventory_labels:
-                g_in = latest_gesture_embed
-                c_in = latest_context_embed
-                if g_in.dim() == 1:
-                    g_in = g_in.unsqueeze(0)
-                if c_in.dim() == 1:
-                    c_in = c_in.unsqueeze(0)
-                with torch.no_grad():
-                    pred_idx, item_logits = classifier.predict(
-                        g_in,
-                        c_in,
-                        inventory_texts=[inventory_labels],
-                    )
-                idx = int(pred_idx.item())
-                if 0 <= idx < len(inventory_labels):
-                    predicted_tool = inventory_labels[idx]
-                scores = item_logits[0, : len(inventory_labels)].detach().cpu().tolist()
-                print(f"[Classifier] predicted tool: {predicted_tool} (idx={idx}) scores={scores}")
+                normalized_labels = [_normalize_label(lbl) for lbl in inventory_labels]
+                missing_labels = [
+                    lbl for lbl, norm_lbl in zip(inventory_labels, normalized_labels)
+                    if norm_lbl not in inventory_embedding_bank
+                ]
+                if missing_labels:
+                    print(f"[inventory] Missing embeddings for {missing_labels}; cannot score inventory.")
+                else:
+                    g_in = latest_gesture_embed
+                    c_in = latest_context_embed
+                    if g_in.dim() == 1:
+                        g_in = g_in.unsqueeze(0)
+                    if c_in.dim() == 1:
+                        c_in = c_in.unsqueeze(0)
+                    with torch.no_grad():
+                        inv_stack = torch.stack(
+                            [inventory_embedding_bank[nlbl] for nlbl in normalized_labels],
+                            dim=0,
+                        )[None, ...]  # [1, I, D]
+                        pred_idx, item_logits = classifier.predict_from_embeddings(
+                            g_in,
+                            c_in,
+                            inventory_embeddings=inv_stack,
+                        )
+                    idx = int(pred_idx.item())
+                    if 0 <= idx < len(inventory_labels):
+                        predicted_tool = inventory_labels[idx]
+                    scores = item_logits[0, : len(inventory_labels)].detach().cpu().tolist()
+                    print(f"[Classifier] predicted tool: {predicted_tool} (idx={idx}) scores={scores}")
 
             response = {
                 "predicted_tool": predicted_tool,
@@ -267,4 +324,3 @@ async def websocket_endpoint(websocket: WebSocket):
 
 # run server:
 # uvicorn unity_server_end2end:app --host 0.0.0.0 --port 8000
-
