@@ -7,14 +7,13 @@ End-to-end multimodal training with raw inputs:
   - Auxiliary context->scene / gesture->intent contrastive (optional if texts provided)
 
 Expected dataset JSONL fields per sample:
-  frames: list[str]           # image paths (ordered clip)
-  left_seq_22: list           # [T][22][3] left hand joints (pre-normalized 22-joint DHG order)
-  right_seq_22: list          # [T][22][3] right hand joints (pre-normalized)
-  item_text: str              # positive text for the correct item (LLM-generated affordance/desc)
-  inventory_texts: list[str]  # optional, for eval only
-  target_idx: int             # optional, index into inventory_texts (eval only)
-  context_text: str           # optional scene description text
-  gesture_text: str           # optional intent/affordance text
+  frames: list[str]             # image paths (ordered clip)
+  left_seq_22: list             # [T][22][3] left hand joints (pre-normalized 22-joint DHG order)
+  right_seq_22: list            # [T][22][3] right hand joints (pre-normalized)
+  object_name: str              # canonical label (matches fphab_label_texts.json entry)
+  item_embedding: list[float]   # CLIP embedding for fused (affordance+context) text
+  context_embedding: list[float]# CLIP embedding for context-only text
+  gesture_embedding: list[float]# CLIP embedding for gesture-only text
 
 Notes:
   - If you prefer to freeze encoders, pass --freeze-context / --freeze-gesture.
@@ -33,6 +32,11 @@ import torch.nn.functional as F
 from PIL import Image
 from torch.utils.data import DataLoader, Dataset
 
+try:
+    import wandb  # type: ignore
+except ImportError:
+    wandb = None
+
 from gesture_encoder import TDGCN_Wrist_Encoder
 from gesture_context_classifier import (
     FusionTreeConfig,
@@ -41,10 +45,34 @@ from gesture_context_classifier import (
 )
 from owl_sgvit_gru import OWLSGVitConfig, OWLSGVitGRU
 
+REPO_DIR = Path(__file__).resolve().parent
+DEFAULT_CLIP_PATH = str(REPO_DIR / "hf_models" / "clip-vit-base-patch32")
+DEFAULT_OWL_PATH = str(REPO_DIR / "hf_models" / "owlvit-base-patch16")
+
 
 def load_jsonl(path: Path) -> List[Dict[str, Any]]:
     with path.open("r", encoding="utf-8") as f:
         return [json.loads(line) for line in f if line.strip()]
+
+
+def load_label_bank(path: Path) -> Tuple[List[str], torch.Tensor, Dict[str, int]]:
+    with path.open("r", encoding="utf-8") as f:
+        data = json.load(f)
+    names: List[str] = []
+    fused: List[List[float]] = []
+    for entry in data:
+        obj = entry.get("object_name")
+        emb = entry.get("fused_embedding")
+        if obj is None or emb is None:
+            continue
+        names.append(str(obj))
+        fused.append(list(emb))
+    if not fused:
+        raise RuntimeError(f"No label embeddings found in {path}")
+    fused_tensor = torch.tensor(fused, dtype=torch.float32)
+    fused_tensor = F.normalize(fused_tensor, dim=-1)
+    name_to_idx = {name: idx for idx, name in enumerate(names)}
+    return names, fused_tensor, name_to_idx
 
 
 class RawSequenceDataset(Dataset):
@@ -60,26 +88,35 @@ class RawSequenceDataset(Dataset):
             "frames": s["frames"],
             "left_seq_22": s["left_seq_22"],
             "right_seq_22": s["right_seq_22"],
-            "item_text": s["item_text"],
+            "object_name": s["object_name"],
+            "item_embedding": s["item_embedding"],
             "inventory": s.get("inventory_texts"),
             "target": torch.tensor(int(s["target_idx"]), dtype=torch.long) if "target_idx" in s else None,
-            "context_text": s.get("context_text"),
-            "gesture_text": s.get("gesture_text"),
+            "context_embedding": s.get("context_embedding"),
+            "gesture_embedding": s.get("gesture_embedding"),
         }
 
 
 def collate_fn(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
     targets = [b["target"] for b in batch]
     has_target = all(t is not None for t in targets)
+
+    def stack_embeddings(key: str) -> Optional[torch.Tensor]:
+        values = [b[key] for b in batch]
+        if not values or any(v is None for v in values):
+            return None
+        return torch.tensor(values, dtype=torch.float32)
+
     return {
         "frames": [b["frames"] for b in batch],
         "left_seq_22": torch.tensor([b["left_seq_22"] for b in batch], dtype=torch.float32),
         "right_seq_22": torch.tensor([b["right_seq_22"] for b in batch], dtype=torch.float32),
-        "item_text": [b["item_text"] for b in batch],
+        "item_embedding": stack_embeddings("item_embedding"),
         "inventory": [b["inventory"] for b in batch],
         "target": torch.stack(targets) if has_target else None,
-        "context_text": [b["context_text"] for b in batch],
-        "gesture_text": [b["gesture_text"] for b in batch],
+        "context_embedding": stack_embeddings("context_embedding"),
+        "gesture_embedding": stack_embeddings("gesture_embedding"),
+        "object_name": [b["object_name"] for b in batch],
     }
 
 
@@ -116,7 +153,7 @@ def info_nce(q: torch.Tensor, bank: torch.Tensor, targets: torch.Tensor, temp: f
 
 @dataclass
 class TrainingConfig:
-    train_path: str
+    train_path: str = "../dataset/F-PHAB/fphab_processed/fphab_train.jsonl"
     val_path: Optional[str] = None
     batch_size: int = 4
     epochs: int = 5
@@ -141,17 +178,27 @@ class TrainingConfig:
     context_dim: int = 768
     fusion_dim: int = 256
     tree_depth: int = 3
+    max_context_frames: int = 4
+    context_max_objects: int = 16
+    context_topk_relations: int = 16
 
     # paths
-    clip_local_path: Optional[str] = None
+    clip_local_path: Optional[str] = DEFAULT_CLIP_PATH
     clip_local_files_only: bool = True
     leaf_text_prompts: Optional[List[str]] = None
-    owl_model_path: Optional[str] = None
-    owl_processor_path: Optional[str] = None
+    owl_model_path: Optional[str] = DEFAULT_OWL_PATH
+    owl_processor_path: Optional[str] = DEFAULT_OWL_PATH
+    label_texts_path: str = "../dataset/F-PHAB/fphab_label_texts.json"
 
     # freeze flags
     freeze_context: bool = False
     freeze_gesture: bool = False
+
+    # logging
+    use_wandb: bool = True
+    wandb_entity: str = "yescher-kyung-hee-university"
+    wandb_project: str = "GestSense"
+    wandb_run_id: Optional[str] = None
 
 
 def make_models(cfg: TrainingConfig, device: torch.device):
@@ -167,8 +214,8 @@ def make_models(cfg: TrainingConfig, device: torch.device):
     owl_cfg = OWLSGVitConfig(
         text_queries=["object"],
         det_threshold=0.2,
-        max_objects=64,
-        topk_relations=32,
+        max_objects=cfg.context_max_objects,
+        topk_relations=cfg.context_topk_relations,
         frame_dim=cfg.context_dim,
         use_attn_pool=True,
         owl_pretrained_path=cfg.owl_model_path,
@@ -214,10 +261,36 @@ def encode_gesture_batch(gesture_encoder: TDGCN_Wrist_Encoder, left_seq: torch.T
     return gesture_encoder(x)
 
 
-def encode_context_batch(context_encoder: OWLSGVitGRU, frames_batch: Sequence[Sequence[str]]) -> torch.Tensor:
+def select_context_frames(frame_paths: Sequence[str], max_frames: int) -> List[str]:
+    if max_frames <= 0 or len(frame_paths) <= max_frames:
+        return list(frame_paths)
+    total = len(frame_paths)
+    step = total / max_frames
+    selected: List[str] = []
+    seen = set()
+    for i in range(max_frames):
+        idx = int(i * step)
+        if idx >= total:
+            idx = total - 1
+        if idx in seen:
+            continue
+        seen.add(idx)
+        selected.append(frame_paths[idx])
+    # ensure we always return max_frames (may need to append last frame)
+    while len(selected) < max_frames:
+        selected.append(frame_paths[-1])
+    return selected
+
+
+def encode_context_batch(
+    context_encoder: OWLSGVitGRU,
+    frames_batch: Sequence[Sequence[str]],
+    max_frames: int,
+) -> torch.Tensor:
     outs = []
     for frames in frames_batch:
-        imgs = [Image.open(f).convert("RGB") for f in frames]
+        limited = select_context_frames(frames, max_frames)
+        imgs = [Image.open(f).convert("RGB") for f in limited]
         c = context_encoder.forward_frames(imgs)  # [1, D]
         outs.append(c.squeeze(0))
     return torch.stack(outs, dim=0)
@@ -231,6 +304,8 @@ def training_step(
     proj_heads: ProjectionHeads,
     cfg: TrainingConfig,
     device: torch.device,
+    label_bank: torch.Tensor,
+    label_name_to_idx: Dict[str, int],
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
     # gesture
     left_seq = batch["left_seq_22"].to(device)
@@ -238,35 +313,41 @@ def training_step(
     g_embed = encode_gesture_batch(gesture_enc, left_seq, right_seq)
 
     # context
-    c_embed = encode_context_batch(context_enc, batch["frames"]).to(device)
+    c_embed = encode_context_batch(context_enc, batch["frames"], cfg.max_context_frames).to(device)
 
     fused = classifier.fusion(g_embed, c_embed)
     leaf_probs = classifier.tree(fused)
 
     q = build_fused_query(classifier, fused, leaf_probs)
 
-    # main contrastive: fused <-> item_text (batch-level InfoNCE, inventory-independent)
-    pos_texts = batch["item_text"]
-    pos_embeds = classifier.clip_scorer.encode_texts(list(pos_texts))  # [B, D]
-    logits = q @ pos_embeds.t() / max(cfg.main_temp, 1e-6)
-    targets_ctr = torch.arange(q.size(0), device=device, dtype=torch.long)
+    indices = torch.tensor(
+        [label_name_to_idx.get(name, -1) for name in batch["object_name"]],
+        dtype=torch.long,
+        device=device,
+    )
+    if (indices < 0).any():
+        missing = [name for name in batch["object_name"] if name not in label_name_to_idx]
+        raise ValueError(f"Missing label embeddings for: {missing}")
+
+    logits = q @ label_bank.t() / max(cfg.main_temp, 1e-6)
+    targets_ctr = indices
     loss_fused_ctr = F.cross_entropy(logits, targets_ctr)
     loss_reg = cfg.reg_weight * SoftDecisionTree.path_entropy(leaf_probs)
 
     # aux losses
-    context_texts = batch["context_text"]
-    gesture_texts = batch["gesture_text"]
+    context_embeds = batch["context_embedding"]
+    gesture_embeds = batch["gesture_embedding"]
 
     loss_ctx_ctr = torch.tensor(0.0, device=device)
-    if context_texts and all(t is not None for t in context_texts):
-        ctx_txt = classifier.clip_scorer.encode_texts(list(context_texts))
+    if context_embeds is not None:
+        ctx_txt = F.normalize(context_embeds.to(device), dim=-1)
         ctx_q = proj_heads.encode_context(c_embed)
         ctx_targets = torch.arange(ctx_q.size(0), device=device, dtype=torch.long)
         loss_ctx_ctr = info_nce(ctx_q, ctx_txt, ctx_targets, cfg.ctx_temp)
 
     loss_g_ctr = torch.tensor(0.0, device=device)
-    if gesture_texts and all(t is not None for t in gesture_texts):
-        g_txt = classifier.clip_scorer.encode_texts(list(gesture_texts))
+    if gesture_embeds is not None:
+        g_txt = F.normalize(gesture_embeds.to(device), dim=-1)
         g_q = proj_heads.encode_gesture(g_embed)
         g_targets = torch.arange(g_q.size(0), device=device, dtype=torch.long)
         loss_g_ctr = info_nce(g_q, g_txt, g_targets, cfg.g_temp)
@@ -287,6 +368,8 @@ def training_step(
 def train(cfg: TrainingConfig):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     gesture_enc, context_enc, classifier, proj_heads = make_models(cfg, device)
+    label_names, fused_bank, name_to_idx = load_label_bank(Path(cfg.label_texts_path))
+    fused_bank = fused_bank.to(device)
 
     train_ds = RawSequenceDataset(Path(cfg.train_path))
     train_loader = DataLoader(
@@ -329,6 +412,18 @@ def train(cfg: TrainingConfig):
     ckpt_dir = Path(cfg.ckpt_dir)
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
+    wandb_run = None
+    if cfg.use_wandb:
+        if wandb is None:
+            raise ImportError("wandb is not installed. Install it or disable --use-wandb.")
+        wandb_run = wandb.init(
+            project=cfg.wandb_project,
+            entity=cfg.wandb_entity,
+            config=vars(cfg),
+            id=cfg.wandb_run_id,
+            resume="allow" if cfg.wandb_run_id else None,
+        )
+
     global_step = 0
     for epoch in range(1, cfg.epochs + 1):
         gesture_enc.train(not cfg.freeze_gesture)
@@ -339,28 +434,60 @@ def train(cfg: TrainingConfig):
         for batch in train_loader:
             optimizer.zero_grad()
             with torch.cuda.amp.autocast(enabled=torch.cuda.is_available()):
-                loss, logs = training_step(batch, gesture_enc, context_enc, classifier, proj_heads, cfg, device)
+                loss, logs = training_step(
+                    batch,
+                    gesture_enc,
+                    context_enc,
+                    classifier,
+                    proj_heads,
+                    cfg,
+                    device,
+                    fused_bank,
+                    name_to_idx,
+                )
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
 
             if global_step % cfg.log_every == 0:
                 print(f"epoch {epoch} step {global_step}: {logs}")
+                if wandb_run:
+                    wandb_logs = {f"train/{k}": v for k, v in logs.items()}
+                    wandb_logs["epoch"] = epoch
+                    wandb_logs["step"] = global_step
+                    wandb.log(wandb_logs, step=global_step)
             global_step += 1
 
         if val_loader:
-            evaluate(gesture_enc, context_enc, classifier, proj_heads, val_loader, cfg, device, epoch)
+            val_logs = evaluate(
+                gesture_enc,
+                context_enc,
+                classifier,
+                proj_heads,
+                val_loader,
+                cfg,
+                device,
+                epoch,
+                fused_bank,
+                name_to_idx,
+            )
+            if wandb_run:
+                wandb_logs = {"epoch": epoch, **val_logs}
+                wandb.log(wandb_logs, step=global_step)
 
         if epoch % cfg.ckpt_every == 0:
             ckpt_path = ckpt_dir / f"epoch_{epoch}.pt"
             torch.save({
                 "gesture_enc": gesture_enc.state_dict(),
-                "context_enc": context_enc.state_dict(),
                 "classifier": classifier.state_dict(),
                 "proj_heads": proj_heads.state_dict(),
                 "cfg": cfg.__dict__,
+                "context_enc": context_enc.state_dict(),
             }, ckpt_path)
             print(f"saved checkpoint to {ckpt_path}")
+
+    if wandb_run:
+        wandb_run.finish()
 
 
 def evaluate(
@@ -372,7 +499,9 @@ def evaluate(
     cfg: TrainingConfig,
     device: torch.device,
     epoch: int,
-):
+    label_bank: torch.Tensor,
+    label_name_to_idx: Dict[str, int],
+) -> Dict[str, float]:
     gesture_enc.eval()
     context_enc.eval()
     classifier.eval()
@@ -383,58 +512,78 @@ def evaluate(
     can_measure_acc = True
     with torch.no_grad():
         for batch in loader:
-            loss, _ = training_step(batch, gesture_enc, context_enc, classifier, proj_heads, cfg, device)
-            batch_size = len(batch["item_text"])
+            loss, _ = training_step(
+                batch,
+                gesture_enc,
+                context_enc,
+                classifier,
+                proj_heads,
+                cfg,
+                device,
+                label_bank,
+                label_name_to_idx,
+            )
+            batch_size = len(batch["frames"])
             total_loss += loss.item() * batch_size
 
             # accuracy over inventory if provided
-            if batch["target"] is None or batch["inventory"] is None or any(inv is None for inv in batch["inventory"]):
+            try:
+                targets = torch.tensor(
+                    [label_name_to_idx[b] for b in batch["object_name"]],
+                    dtype=torch.long,
+                    device=device,
+                )
+            except KeyError:
                 can_measure_acc = False
                 continue
 
-            targets = batch["target"].to(device)
             left_seq = batch["left_seq_22"].to(device)
             right_seq = batch["right_seq_22"].to(device)
             g_embed = encode_gesture_batch(gesture_enc, left_seq, right_seq)
-            c_embed = encode_context_batch(context_enc, batch["frames"]).to(device)
+            c_embed = encode_context_batch(context_enc, batch["frames"], cfg.max_context_frames).to(device)
 
             fused = classifier.fusion(g_embed, c_embed)
             leaf_probs = classifier.tree(fused)
-            inv_embeds, inv_mask = classifier.clip_scorer.batch_encode_inventory(batch["inventory"])
-            inv_embeds = F.normalize(inv_embeds, dim=-1)
             q = build_fused_query(classifier, fused, leaf_probs)
-            logits = torch.einsum("bd,bid->bi", q, inv_embeds) / max(classifier.cfg.sim_temperature, 1e-6)
-            logits = logits.masked_fill(~inv_mask, float("-inf"))
+            logits = q @ label_bank.t() / max(cfg.main_temp, 1e-6)
             preds = logits.argmax(dim=-1)
             correct += (preds == targets).sum().item()
             total += targets.size(0)
 
     denom = len(loader.dataset) if hasattr(loader, "dataset") else max(total, 1)
     avg_loss = total_loss / max(denom, 1)
+    logs: Dict[str, float] = {"val/loss": float(avg_loss)}
     if can_measure_acc and total > 0:
         acc = correct / max(total, 1)
+        logs["val/acc"] = float(acc)
         print(f"[val] epoch {epoch} loss={avg_loss:.4f} acc={acc:.4f}")
     else:
         print(f"[val] epoch {epoch} loss={avg_loss:.4f} (acc skipped: inventory/target not provided)")
+    return logs
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--train", dest="train_path", required=True)
+    parser.add_argument("--train", dest="train_path", default="../dataset/F-PHAB/fphab_processed/fphab_train.jsonl")
     parser.add_argument("--val", dest="val_path", default=None)
-    parser.add_argument("--epochs", type=int, default=5)
-    parser.add_argument("--batch-size", type=int, default=4)
+    parser.add_argument("--epochs", type=int, default=30)
+    parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
-    parser.add_argument("--clip-local", type=str, default=None)
+    parser.add_argument("--clip-local", type=str, default=DEFAULT_CLIP_PATH)
     parser.add_argument("--no-clip-local-files-only", action="store_true")
     parser.add_argument("--leaf-prompts", type=str, nargs="*", default=None)
-    parser.add_argument("--owl-model-path", type=str, default=None)
-    parser.add_argument("--owl-processor-path", type=str, default=None)
+    parser.add_argument("--owl-model-path", type=str, default=DEFAULT_OWL_PATH)
+    parser.add_argument("--owl-processor-path", type=str, default=DEFAULT_OWL_PATH)
+    parser.add_argument("--label-texts", type=str, default="../dataset/F-PHAB/fphab_label_texts.json")
     parser.add_argument("--freeze-context", action="store_true")
     parser.add_argument("--freeze-gesture", action="store_true")
     parser.add_argument("--log-every", type=int, default=10)
     parser.add_argument("--ckpt-dir", type=str, default="checkpoints_end2end")
+    parser.add_argument("--no-wandb", action="store_true", help="Disable Weights & Biases logging.")
+    parser.add_argument("--wandb-entity", type=str, default="yescher-kyung-hee-university")
+    parser.add_argument("--wandb-project", type=str, default="GestSense")
+    parser.add_argument("--wandb-run-id", type=str, default="OWL_GRU_Skel_NoVal_1")
     args = parser.parse_args()
 
     cfg = TrainingConfig(
@@ -449,9 +598,14 @@ if __name__ == "__main__":
         leaf_text_prompts=args.leaf_prompts,
         owl_model_path=args.owl_model_path,
         owl_processor_path=args.owl_processor_path,
+        label_texts_path=args.label_texts,
         freeze_context=args.freeze_context,
         freeze_gesture=args.freeze_gesture,
         log_every=args.log_every,
         ckpt_dir=args.ckpt_dir,
+        use_wandb=not args.no_wandb,
+        wandb_entity=args.wandb_entity,
+        wandb_project=args.wandb_project,
+        wandb_run_id=args.wandb_run_id,
     )
     train(cfg)

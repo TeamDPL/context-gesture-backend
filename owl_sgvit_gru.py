@@ -17,7 +17,8 @@ def box_to_patch_indices(
     box_xyxy: torch.Tensor,
     img_w: int,
     img_h: int,
-    patch_size: int
+    grid_w: int,
+    grid_h: int
 ) -> List[int]:
     """
     Map a bounding box to patch-token indices of ViT grid.
@@ -26,17 +27,18 @@ def box_to_patch_indices(
     """
     x1, y1, x2, y2 = box_xyxy.tolist()
 
-    gw, gh = img_w // patch_size, img_h // patch_size  # grid width, height
+    if grid_w <= 0 or grid_h <= 0:
+        return []
 
-    px1 = int(max(0, math.floor(x1 / patch_size)))
-    py1 = int(max(0, math.floor(y1 / patch_size)))
-    px2 = int(min(gw - 1, math.floor(x2 / patch_size)))
-    py2 = int(min(gh - 1, math.floor(y2 / patch_size)))
+    px1 = int(max(0, math.floor(x1 / img_w * grid_w)))
+    py1 = int(max(0, math.floor(y1 / img_h * grid_h)))
+    px2 = int(min(grid_w - 1, math.floor(x2 / img_w * grid_w)))
+    py2 = int(min(grid_h - 1, math.floor(y2 / img_h * grid_h)))
 
     idxs = []
     for py in range(py1, py2 + 1):
         for px in range(px1, px2 + 1):
-            idxs.append(py * gw + px)
+            idxs.append(py * grid_w + px)
 
     return idxs
 
@@ -219,6 +221,19 @@ class OWLSGVitGRU(nn.Module):
 
         outputs = self.owl(**inputs, output_hidden_states=True)
         vision_tokens = self._extract_vision_tokens(outputs)
+        if vision_tokens.dim() != 2:
+            vision_tokens = vision_tokens.view(vision_tokens.shape[0], -1)
+        if vision_tokens.size(0) <= 1:
+            return vision_tokens.mean(dim=0)
+        patch_tokens = vision_tokens[1:].contiguous()
+        num_patch_tokens = patch_tokens.size(0)
+        grid = int(math.sqrt(num_patch_tokens))
+        if grid <= 0:
+            return vision_tokens.mean(dim=0)
+        grid_w = grid
+        grid_h = max(1, num_patch_tokens // grid_w)
+        usable = grid_w * grid_h
+        patch_tokens = patch_tokens[:usable]
 
         # -------------------------
         # 1) Boxes from OWL-ViT
@@ -246,17 +261,16 @@ class OWLSGVitGRU(nn.Module):
         # 2) Patch tokens
         # -------------------------
         img_w, img_h = image.size
-        patch_size = self.processor.image_processor.patch_size  # usually 16
 
         # -------------------------
         # 3) Box-based patch pooling -> obj embeddings
         # -------------------------
         obj_embeds = []
         for b in boxes:
-            idxs = box_to_patch_indices(b, img_w, img_h, patch_size)
+            idxs = box_to_patch_indices(b, img_w, img_h, grid_w, grid_h)
             if len(idxs) == 0:
                 continue
-            tok = vision_tokens[idxs, :]    # [n_patches, D]
+            tok = patch_tokens[idxs, :]
             obj_embeds.append(tok.mean(dim=0))
 
         if len(obj_embeds) == 0:
