@@ -225,3 +225,4 @@ TD-GCN-Gesture/
 
 # Model Checkpoints
 checkpoints_end2end/
+wandb/
