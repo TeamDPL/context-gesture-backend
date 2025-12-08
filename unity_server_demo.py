@@ -238,8 +238,6 @@ async def websocket_endpoint(websocket: WebSocket):
                     label = str(tool)
                 if label:
                     inventory_labels.append(str(label))
-            if inventory_labels:
-                print(f"Available tools: {inventory_labels}")
 
             if screen_capture:
                 try:
@@ -305,7 +303,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     idx = inventory_labels.index(current_tool)
                     scores[idx] = 1.0
                 
-                print(f"[Classifier] predicted tool: {predicted_tool} (counter={counter}/{threshold}) scores={scores}")
+                print(f"[Classifier] predicted tool: {predicted_tool}")
 
             response = {
                 "predicted_tool": predicted_tool,
