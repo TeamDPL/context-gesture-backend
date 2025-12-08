@@ -20,8 +20,8 @@ from owl_sgvit_gru import OWLSGVitConfig, OWLSGVitGRU
 REPO_DIR = Path(__file__).resolve().parent
 DEFAULT_CKPT = REPO_DIR / "checkpoints_end2end" / "epoch_6.pt"
 CKPT_PATH = Path(os.getenv("E2E_CKPT_PATH", str(DEFAULT_CKPT)))
-DEFAULT_INVENTORY_TEXTS = REPO_DIR.parent / "dataset" / "F-PHAB" / "fphab_inventory_texts.json"
-INVENTORY_TEXTS_PATH = Path(os.getenv("INVENTORY_TEXTS_PATH", str(DEFAULT_INVENTORY_TEXTS)))
+DEFAULT_INVENTORY_TEXTS = REPO_DIR / "json" / "fphab_inventory_texts.json"
+INVENTORY_TEXTS_PATH = Path(os.getenv("INVENTORY_TEXTS_PATH") or DEFAULT_INVENTORY_TEXTS)
 
 # ==== Globals ====
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
