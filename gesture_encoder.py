@@ -399,7 +399,10 @@ class GestureStreamProcessor:
         self.encoder = TDGCN_Wrist_Encoder(device)
         self.encoder.eval()
         self.seq_buf = {"Left": deque(maxlen=SEQ_LEN), "Right": deque(maxlen=SEQ_LEN)}
-        self.left_wrist_world_ref = None
+        # 좌표계 고정 정보 (origin, 어떤 손 기준인지, 고정 만료 시각)
+        self.origin_world_ref = None
+        self.origin_side = None
+        self.origin_lock_until = 0.0
 
     def parse_hand_data(self, hand_data):
         if not hand_data: return None
@@ -415,6 +418,7 @@ class GestureStreamProcessor:
     def process(self, left_hand_data, right_hand_data):
         # Process Hand Data
         current_hands = {}
+        now = time.time()
         
         l_xyz = self.parse_hand_data(left_hand_data)
         r_xyz = self.parse_hand_data(right_hand_data)
@@ -424,8 +428,8 @@ class GestureStreamProcessor:
         if r_xyz is not None:
             current_hands["Right"] = r_xyz
 
-        # Track which hand's wrist is being used as reference
-        is_left_hand_wrist_based = False
+        # Track which hand's wrist is being used as reference (고정 고려)
+        is_left_hand_wrist_based = (self.origin_side == "Left")
 
         # If we have any hand data, process it
         if current_hands:
@@ -434,18 +438,28 @@ class GestureStreamProcessor:
             for side, xyz21 in current_hands.items():
                 xyz22_dict[side] = mediapipe21_to_dhg22(xyz21)
 
-            # Determine which hand's wrist to use as reference
-            # Priority: Left hand if visible, otherwise Right hand
-            origin = None
-            if "Left" in xyz22_dict:
-                origin = xyz22_dict["Left"][0].copy()
-                self.left_wrist_world_ref = origin
-                is_left_hand_wrist_based = True
-            elif "Right" in xyz22_dict:
-                # Use right hand wrist if left is not visible
-                origin = xyz22_dict["Right"][0].copy()
-                self.left_wrist_world_ref = origin  # Update reference to right wrist
-                is_left_hand_wrist_based = False
+            # Determine which hand's wrist to use as reference with 2s lock
+            lock_active = (self.origin_world_ref is not None) and (now < self.origin_lock_until)
+            origin = self.origin_world_ref
+
+            if not lock_active:
+                # Priority: Left hand if visible, otherwise Right hand
+                if "Left" in xyz22_dict:
+                    origin = xyz22_dict["Left"][0].copy()
+                    self.origin_side = "Left"
+                    is_left_hand_wrist_based = True
+                elif "Right" in xyz22_dict:
+                    origin = xyz22_dict["Right"][0].copy()
+                    self.origin_side = "Right"
+                    is_left_hand_wrist_based = False
+
+                # Lock origin for 2 seconds once set
+                if origin is not None:
+                    self.origin_world_ref = origin
+                    self.origin_lock_until = now + 2.0
+            else:
+                # 유지된 origin/side 사용
+                is_left_hand_wrist_based = (self.origin_side == "Left")
             
             # Normalize both hands using the determined origin
             for side in ["Left", "Right"]:

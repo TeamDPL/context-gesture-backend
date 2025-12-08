@@ -222,3 +222,6 @@ obj_images/
 
 # TD-GCN-Gesture
 TD-GCN-Gesture/
+
+# Model Checkpoints
+checkpoints_end2end/
