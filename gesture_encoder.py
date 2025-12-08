@@ -21,7 +21,8 @@ import torch.nn as nn
 TDGCN_REPO   = os.path.expanduser("./TD-GCN-Gesture")
 CONFIG_YAML  = os.path.join(TDGCN_REPO, "config", "dhg14-28", "DHG14-28.yaml")
 WEIGHTS_PATH = os.path.join(TDGCN_REPO, "checkpoints", "DHG", "DHG14label", "Sub3_j.pt")
-SEQ_LEN = 64
+# Default sequence length for inference/training windows
+SEQ_LEN = 10
 PRINT_INTERVAL = 1.0
 
 # 미러 & 핸디드니스 옵션
@@ -360,6 +361,7 @@ def main():
         cap.release()
         cv2.destroyAllWindows()
 
+
 class TDGCN_Wrist_Encoder(nn.Module):
     def __init__(self, device):
         super().__init__()
@@ -372,7 +374,7 @@ class TDGCN_Wrist_Encoder(nn.Module):
         # x: (B, 2, 3, T, 22, 1) -> Two hands
         # Reshape to (B*2, 3, T, 22, 1) to process in batch
         B, Two, C, T, V, M = x.shape
-        x_flat = x.view(B * Two, C, T, V, M)
+        x_flat = x.reshape(B * Two, C, T, V, M)
         
         logits = self.model(x_flat)
         if self.feature_blob["feat"] is not None and not self.training:
@@ -381,7 +383,7 @@ class TDGCN_Wrist_Encoder(nn.Module):
             enc = logits
             
         # Reshape back to (B, 2, 256)
-        enc_dual = enc.view(B, Two, -1)
+        enc_dual = enc.reshape(B, Two, -1)
         
         # Concatenate Right and Left -> (B, 512)
         # Assuming index 0 is Right, 1 is Left (or vice versa, order is preserved)
