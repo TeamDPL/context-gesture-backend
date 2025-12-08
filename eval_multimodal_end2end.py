@@ -3,7 +3,7 @@
 Evaluate a trained multimodal model checkpoint on a JSONL dataset.
 Usage example:
   python eval_multimodal_end2end.py \
-      --data ../dataset/F-PHAB/fphab_processed/fphab_test.jsonl \
+      --test ../dataset/F-PHAB/fphab_processed/fphab_test.jsonl \
       --ckpt checkpoints_end2end/epoch_5.pt \
       --label-texts ../dataset/F-PHAB/fphab_label_texts.json
 """
@@ -27,9 +27,9 @@ from train_multimodal_end2end import (
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Evaluate a multimodal checkpoint on a JSONL dataset.")
-    parser.add_argument("--data", type=str, required=True, help="Path to JSONL file (e.g., test split).")
+    parser.add_argument("--test", type=str, default="../dataset/F-PHAB/fphab_processed/fphab_test.jsonl", help="Path to JSONL file (e.g., test split).")
     parser.add_argument("--ckpt", type=str, default="./checkpoints_end2end/epoch_6.pt", help="Checkpoint path saved by train_multimodal_end2end.py.")
-    parser.add_argument("--label-texts", type=str, default=None, help="Override path to fphab_label_texts.json.")
+    parser.add_argument("--label-texts", type=str, default="../dataset/F-PHAB/fphab_label_texts.json", help="Override path to fphab_label_texts.json.")
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--num-workers", type=int, default=4)
     args = parser.parse_args()
@@ -40,11 +40,11 @@ def main() -> None:
     if cfg_dict is None:
         raise RuntimeError(f"Checkpoint {ckpt_path} missing 'cfg' dictionary.")
     cfg = TrainingConfig(**cfg_dict)
-    cfg.train_path = args.data  # not used but keeps reference
+    cfg.train_path = args.test  # not used but keeps reference
     if args.label_texts:
         cfg.label_texts_path = args.label_texts
 
-    dataset = RawSequenceDataset(Path(args.data))
+    dataset = RawSequenceDataset(Path(args.test))
     loader = DataLoader(
         dataset,
         batch_size=args.batch_size,
