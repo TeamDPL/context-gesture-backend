@@ -1,3 +1,4 @@
+# pip install -r requirements.txt
 # python version = 3.13
 fastapi==0.120.4
 uvicorn==0.38.0
