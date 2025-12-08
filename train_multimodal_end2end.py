@@ -37,6 +37,11 @@ try:
 except ImportError:
     wandb = None
 
+try:
+    from tqdm.auto import tqdm
+except ImportError:
+    tqdm = None
+
 from gesture_encoder import TDGCN_Wrist_Encoder
 from gesture_context_classifier import (
     FusionTreeConfig,
@@ -501,6 +506,7 @@ def evaluate(
     epoch: int,
     label_bank: torch.Tensor,
     label_name_to_idx: Dict[str, int],
+    progress_desc: Optional[str] = None,
 ) -> Dict[str, float]:
     gesture_enc.eval()
     context_enc.eval()
@@ -510,8 +516,17 @@ def evaluate(
     total, correct = 0, 0
     total_loss = 0.0
     can_measure_acc = True
+    iterator = loader
+    pbar = None
+    if progress_desc:
+        if tqdm is None:
+            print("tqdm is not installed; continuing without a progress bar.")
+        else:
+            total_batches = len(loader)
+            iterator = tqdm(loader, desc=progress_desc, total=total_batches, leave=True)
+            pbar = iterator
     with torch.no_grad():
-        for batch in loader:
+        for batch in iterator:
             loss, _ = training_step(
                 batch,
                 gesture_enc,
@@ -549,6 +564,8 @@ def evaluate(
             preds = logits.argmax(dim=-1)
             correct += (preds == targets).sum().item()
             total += targets.size(0)
+    if pbar is not None:
+        pbar.close()
 
     denom = len(loader.dataset) if hasattr(loader, "dataset") else max(total, 1)
     avg_loss = total_loss / max(denom, 1)
