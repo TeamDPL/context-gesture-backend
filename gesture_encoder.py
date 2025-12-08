@@ -443,15 +443,15 @@ class GestureStreamProcessor:
             origin = self.origin_world_ref
 
             if not lock_active:
-                # Priority: Left hand if visible, otherwise Right hand
-                if "Left" in xyz22_dict:
-                    origin = xyz22_dict["Left"][0].copy()
+            # Priority: Left hand if visible, otherwise Right hand
+            if "Left" in xyz22_dict:
+                origin = xyz22_dict["Left"][0].copy()
                     self.origin_side = "Left"
-                    is_left_hand_wrist_based = True
-                elif "Right" in xyz22_dict:
-                    origin = xyz22_dict["Right"][0].copy()
+                is_left_hand_wrist_based = True
+            elif "Right" in xyz22_dict:
+                origin = xyz22_dict["Right"][0].copy()
                     self.origin_side = "Right"
-                    is_left_hand_wrist_based = False
+                is_left_hand_wrist_based = False
 
                 # Lock origin for 2 seconds once set
                 if origin is not None:
