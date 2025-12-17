@@ -515,6 +515,8 @@ def evaluate(
 
     total, correct = 0, 0
     total_loss = 0.0
+    total_samples = 0
+    loss_sums: Dict[str, float] = {}
     can_measure_acc = True
     iterator = loader
     pbar = None
@@ -527,7 +529,7 @@ def evaluate(
             pbar = iterator
     with torch.no_grad():
         for batch in iterator:
-            loss, _ = training_step(
+            loss, batch_logs = training_step(
                 batch,
                 gesture_enc,
                 context_enc,
@@ -539,7 +541,10 @@ def evaluate(
                 label_name_to_idx,
             )
             batch_size = len(batch["frames"])
+            total_samples += batch_size
             total_loss += loss.item() * batch_size
+            for key, value in batch_logs.items():
+                loss_sums[key] = loss_sums.get(key, 0.0) + value * batch_size
 
             # accuracy over inventory if provided
             try:
@@ -567,9 +572,11 @@ def evaluate(
     if pbar is not None:
         pbar.close()
 
-    denom = len(loader.dataset) if hasattr(loader, "dataset") else max(total, 1)
+    denom = len(loader.dataset) if hasattr(loader, "dataset") else max(total_samples, 1)
     avg_loss = total_loss / max(denom, 1)
     logs: Dict[str, float] = {"val/loss": float(avg_loss)}
+    for key, value in loss_sums.items():
+        logs[f"val/{key}"] = float(value / max(denom, 1))
     if can_measure_acc and total > 0:
         acc = correct / max(total, 1)
         logs["val/acc"] = float(acc)
@@ -595,6 +602,7 @@ if __name__ == "__main__":
     parser.add_argument("--label-texts", type=str, default="../dataset/F-PHAB/fphab_label_texts.json")
     parser.add_argument("--freeze-context", action="store_true")
     parser.add_argument("--freeze-gesture", action="store_true")
+    parser.add_argument("--max-context-frames", type=int, default=5, help="Number of frames per clip to feed the context encoder.")
     parser.add_argument("--log-every", type=int, default=10)
     parser.add_argument("--ckpt-dir", type=str, default="checkpoints_end2end")
     parser.add_argument("--no-wandb", action="store_true", help="Disable Weights & Biases logging.")
@@ -618,6 +626,7 @@ if __name__ == "__main__":
         label_texts_path=args.label_texts,
         freeze_context=args.freeze_context,
         freeze_gesture=args.freeze_gesture,
+        max_context_frames=args.max_context_frames,
         log_every=args.log_every,
         ckpt_dir=args.ckpt_dir,
         use_wandb=not args.no_wandb,
