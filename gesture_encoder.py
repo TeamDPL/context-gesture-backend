@@ -22,7 +22,7 @@ TDGCN_REPO   = os.path.expanduser("./TD-GCN-Gesture")
 CONFIG_YAML  = os.path.join(TDGCN_REPO, "config", "dhg14-28", "DHG14-28.yaml")
 WEIGHTS_PATH = os.path.join(TDGCN_REPO, "checkpoints", "DHG", "DHG14label", "Sub3_j.pt")
 # Default sequence length for inference/training windows
-SEQ_LEN = 10
+SEQ_LEN = 20
 PRINT_INTERVAL = 1.0
 
 # 미러 & 핸디드니스 옵션
@@ -400,6 +400,12 @@ class GestureStreamProcessor:
         self.encoder.eval()
         self.seq_buf = {"Left": deque(maxlen=SEQ_LEN), "Right": deque(maxlen=SEQ_LEN)}
         # 좌표계 고정 정보 (origin, 어떤 손 기준인지, 고정 만료 시각)
+        self.origin_world_ref = None
+        self.origin_side = None
+        self.origin_lock_until = 0.0
+
+    def reset(self):
+        self.seq_buf = {"Left": deque(maxlen=SEQ_LEN), "Right": deque(maxlen=SEQ_LEN)}
         self.origin_world_ref = None
         self.origin_side = None
         self.origin_lock_until = 0.0

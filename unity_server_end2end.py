@@ -2,7 +2,7 @@ import os
 import json
 import base64
 import datetime
-from collections import deque
+import time
 from pathlib import Path
 
 import cv2
@@ -26,6 +26,12 @@ INVENTORY_TEXTS_PATH = Path(os.getenv("INVENTORY_TEXTS_PATH", str(DEFAULT_INVENT
 # ==== Globals ====
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 app = FastAPI()
+
+# Sequence control (trigger-based collection)
+TRIGGER_GAP_SEC = float(os.getenv("TRIGGER_GAP_SEC", "1.5"))
+CONTEXT_SEQ_FRAMES = int(os.getenv("CONTEXT_SEQ_FRAMES", "10"))
+if CONTEXT_SEQ_FRAMES < 1:
+    CONTEXT_SEQ_FRAMES = 1
 
 # runtime caches
 latest_gesture_embed = None  # torch.Tensor [1, G]
@@ -133,14 +139,16 @@ def _load_models():
     classifier.eval()
     gesture_processor.encoder.eval()
 
-    # Frame buffer for context aggregation
-    max_frames = ck_cfg.get("max_context_frames", 4)
-    frame_buffer = deque(maxlen=max_frames if max_frames and max_frames > 0 else 4)
+    # Frame embedding buffer for context aggregation (sequence-based)
+    context_frame_buffer = []
 
-    return gesture_processor, context_model, classifier, frame_buffer, ck_cfg
+    return gesture_processor, context_model, classifier, context_frame_buffer, ck_cfg
 
 
-gesture_processor, context_model, classifier, frame_buffer, ck_cfg = _load_models()
+gesture_processor, context_model, classifier, context_frame_buffer, ck_cfg = _load_models()
+CONTEXT_SEQ_FRAMES = int(ck_cfg.get("context_seq_frames", CONTEXT_SEQ_FRAMES))
+if CONTEXT_SEQ_FRAMES < 1:
+    CONTEXT_SEQ_FRAMES = 1
 
 
 def _normalize_label(name: str) -> str:
@@ -202,20 +210,45 @@ async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     print("Unity client connected (end2end).")
 
+    last_message_time = None
+    gesture_ready = False
+    context_ready = False
+    sequence_done = False
+    inventory_labels_cache = []
+    gesture_processor.reset()
+    context_frame_buffer.clear()
+    latest_gesture_embed = None
+    latest_context_embed = None
+    is_left_hand_wrist_based = False
+
     try:
         while True:
             data_str = await websocket.receive_text()
             data = json.loads(data_str)
+            now = time.time()
+            if last_message_time is None or (now - last_message_time) > TRIGGER_GAP_SEC:
+                gesture_processor.reset()
+                context_frame_buffer.clear()
+                latest_gesture_embed = None
+                latest_context_embed = None
+                is_left_hand_wrist_based = False
+                gesture_ready = False
+                context_ready = False
+                sequence_done = False
+                inventory_labels_cache = []
+            last_message_time = now
 
             # ---- Gesture data ----
             left_hand_data = data.get("left_hand")
             right_hand_data = data.get("right_hand")
 
-            gesture_result, is_left = gesture_processor.process(left_hand_data, right_hand_data)
-            if gesture_result is not None:
-                latest_gesture_embed = gesture_result.detach()
-                is_left_hand_wrist_based = is_left
-                print("Gesture embedding shape:", latest_gesture_embed.shape)
+            if not gesture_ready:
+                gesture_result, is_left = gesture_processor.process(left_hand_data, right_hand_data)
+                if gesture_result is not None:
+                    latest_gesture_embed = gesture_result.detach()
+                    is_left_hand_wrist_based = is_left
+                    gesture_ready = True
+                    print("Gesture embedding shape:", latest_gesture_embed.shape)
 
             # ---- Context data ----
             screen_capture = data.get("screen_capture")
@@ -232,9 +265,10 @@ async def websocket_endpoint(websocket: WebSocket):
                 if label:
                     inventory_labels.append(str(label))
             if inventory_labels:
+                inventory_labels_cache = inventory_labels
                 print(f"Available tools: {inventory_labels}")
 
-            if screen_capture:
+            if screen_capture and not context_ready:
                 try:
                     img_cv = _decode_b64_image(screen_capture)
                     if img_cv is not None:
@@ -246,14 +280,18 @@ async def websocket_endpoint(websocket: WebSocket):
                         file_path = SCREEN_SAVE_DIRECTORY / filename
                         cv2.imwrite(str(file_path), img_cv)
 
-                        # Convert to PIL and update buffer
+                        # Convert to PIL and update per-frame embeddings
                         pil_img = Image.fromarray(cv2.cvtColor(img_cv, cv2.COLOR_BGR2RGB))
-                        frame_buffer.append(pil_img)
+                        with torch.no_grad():
+                            frame_embed = context_model.encode_one_frame(pil_img)
+                        context_frame_buffer.append(frame_embed.detach())
 
-                        if len(frame_buffer) > 0:
+                        if len(context_frame_buffer) >= CONTEXT_SEQ_FRAMES:
                             with torch.no_grad():
-                                context_embedding = context_model.forward_frames(list(frame_buffer))
+                                Z = torch.stack(context_frame_buffer[:CONTEXT_SEQ_FRAMES], dim=0).unsqueeze(0)
+                                context_embedding = context_model.temporal(Z)
                             latest_context_embed = context_embedding.detach()
+                            context_ready = True
                             print("Context embedding shape:", latest_context_embed.shape)
                 except Exception as e:
                     print(f"Error decoding screen image: {e}")
@@ -277,12 +315,15 @@ async def websocket_endpoint(websocket: WebSocket):
                         print(f"Error decoding object image for '{label}': {e}")
 
             # ---- Prediction ----
-            predicted_tool = ""
-            scores = None
-            if latest_gesture_embed is not None and latest_context_embed is not None and inventory_labels:
-                normalized_labels = [_normalize_label(lbl) for lbl in inventory_labels]
+            if not sequence_done and gesture_ready and context_ready:
+                labels_for_inference = inventory_labels or inventory_labels_cache
+                if not labels_for_inference:
+                    continue
+                predicted_tool = ""
+                scores = None
+                normalized_labels = [_normalize_label(lbl) for lbl in labels_for_inference]
                 missing_labels = [
-                    lbl for lbl, norm_lbl in zip(inventory_labels, normalized_labels)
+                    lbl for lbl, norm_lbl in zip(labels_for_inference, normalized_labels)
                     if norm_lbl not in inventory_embedding_bank
                 ]
                 if missing_labels:
@@ -305,16 +346,17 @@ async def websocket_endpoint(websocket: WebSocket):
                             inventory_embeddings=inv_stack,
                         )
                     idx = int(pred_idx.item())
-                    if 0 <= idx < len(inventory_labels):
-                        predicted_tool = inventory_labels[idx]
-                    scores = item_logits[0, : len(inventory_labels)].detach().cpu().tolist()
+                    if 0 <= idx < len(labels_for_inference):
+                        predicted_tool = labels_for_inference[idx]
+                    scores = item_logits[0, : len(labels_for_inference)].detach().cpu().tolist()
                     print(f"[Classifier] predicted tool: {predicted_tool} (idx={idx}) scores={scores}")
 
-            response = {
-                "predicted_tool": predicted_tool,
-                "is_left_hand_wrist_based": is_left_hand_wrist_based,
-            }
-            await websocket.send_json(response)
+                response = {
+                    "predicted_tool": predicted_tool,
+                    "is_left_hand_wrist_based": is_left_hand_wrist_based,
+                }
+                await websocket.send_json(response)
+                sequence_done = True
 
     except WebSocketDisconnect:
         print("Unity client disconnected.")
